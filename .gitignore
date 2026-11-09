@@ -1,0 +1,13 @@
+# 上游 CSV 缓存（由 scripts/fetch_upstream.py 生成）
+vendor/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+
+# 本地日志/临时文件
+logs/
+*.tmp

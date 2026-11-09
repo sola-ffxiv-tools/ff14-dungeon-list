@@ -1,0 +1,84 @@
+name: update-duty-data
+
+on:
+  # 每月 1 日 18:00 UTC = 北京时间 2 日 02:00
+  schedule:
+    - cron: "0 18 1 * *"
+  # 国服版本更新后手动触发一次
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "上游分支或 commit（默认 master）"
+        required: false
+        default: master
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-duty-data
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 拉取上游 CSV
+        run: |
+          python scripts/fetch_upstream.py \
+            --ref "${{ inputs.upstream_ref || 'master' }}" \
+            --out vendor
+
+      - name: 生成 JSON
+        run: python scripts/build_duties.py --input vendor --out data
+
+      - name: 提交并推送
+        id: publish
+        run: |
+          git config user.name "duty-data-bot"
+          git config user.email "duty-data-bot@users.noreply.github.com"
+
+          git add data
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "数据无变化，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "data: refresh $(date -u +%Y-%m-%d)"
+          git tag "data-$(date -u +%Y%m%d-%H%M%S)"
+          # 用当前分支名，不写死 main
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin --tags
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 同步到 Gitee
+        if: steps.publish.outputs.changed == 'true'
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_USER: ${{ vars.GITEE_USER }}
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ] || [ -z "$GITEE_USER" ] || [ -z "$GITEE_REPO" ]; then
+            echo "::warning::Gitee 相关配置不完整（GITEE_TOKEN / GITEE_USER / GITEE_REPO），跳过同步"
+            exit 0
+          fi
+
+          branch="${GITEE_BRANCH:-main}"
+          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
+          # Gitee 侧是纯镜像：即使建仓时勾了 README/初始提交也直接覆盖
+          git push --force gitee "HEAD:${branch}" --tags
