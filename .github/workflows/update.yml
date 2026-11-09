@@ -22,17 +22,18 @@ concurrency:
 
 jobs:
   build-and-publish:
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 正在往 Ubuntu 26 迁移，避免环境漂移
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -54,20 +55,31 @@ jobs:
           git add data
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "数据无变化，跳过提交"
+            echo "没有任何变化"
             exit 0
           fi
 
-          git commit -m "data: refresh $(date -u +%Y-%m-%d)"
-          git tag "data-$(date -u +%Y%m%d-%H%M%S)"
-          # 用当前分支名，不写死 main
+          # 只有 maze.json / duties.json 变了才算内容更新；只更新 status.json 的是心跳提交。
+          # 心跳提交保证公共仓库 60 天内始终有活动，定时任务不会被 GitHub 自动禁用。
+          if git diff --cached --quiet -- data/maze.json data/duties.json; then
+            message="chore: heartbeat $(date -u +%Y-%m-%d)"
+            tag=""
+          else
+            message="data: refresh $(date -u +%Y-%m-%d)"
+            tag="data-$(date -u +%Y%m%d-%H%M%S)"
+          fi
+
+          git commit -m "$message"
           git push origin "HEAD:${GITHUB_REF_NAME}"
-          git push origin --tags
+          if [ -n "$tag" ]; then
+            git tag "$tag"
+            git push origin "$tag"
+          fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: 同步到 Gitee
-        # 数据有变化时自动同步；手动触发时也强制同步一次，方便首次配置后验证
-        if: steps.publish.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        # 内容更新和心跳提交都会推送，保证 Gitee 镜像始终跟 GitHub 一致
+        if: steps.publish.outputs.changed == 'true'
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_USER: ${{ vars.GITEE_USER }}
