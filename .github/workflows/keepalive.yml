@@ -1,0 +1,97 @@
+name: keepalive
+
+# 保活：公共仓库 60 天没有任何仓库活动时，GitHub 会自动禁用 scheduled workflow。
+# 这个 workflow 每周检查一次仓库最后活动时间，长期闲置时才往独立的 keepalive
+# 分支推一个单 commit 心跳，main 的数据提交历史保持干净。
+#
+# 阈值和分支名都可以用仓库 Variables 覆盖，方便 fork 后自行调整：
+#   KEEPALIVE_THRESHOLD_DAYS  默认 45（必须小于 60，留出调度延迟的余量）
+#   KEEPALIVE_BRANCH          默认 keepalive
+
+on:
+  # 每周四 18:00 UTC = 北京时间周五 02:00（与 update-duty-data 错开）
+  schedule:
+    - cron: "0 18 * * 4"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "忽略阈值，立即推一次心跳（用于验证配置）"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    # 只在默认分支跑
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 判断仓库是否长期闲置
+        id: check
+        env:
+          THRESHOLD_DAYS: ${{ vars.KEEPALIVE_THRESHOLD_DAYS || 45 }}
+        run: |
+          # 拉取全部分支，按提交时间找仓库最近一次活动（含 keepalive 分支自身）
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          last_ts="$(git for-each-ref --sort=-committerdate --format='%(committerdate:unix)' refs/remotes/origin | head -n 1)"
+
+          if [ -z "${last_ts}" ]; then
+            echo "::warning::无法读取仓库最后活动时间，跳过"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          now="$(date -u +%s)"
+          idle_days=$(( (now - last_ts) / 86400 ))
+          echo "最后活动: $(date -u -d "@${last_ts}" +%Y-%m-%dT%H:%M:%SZ)（${idle_days} 天前），阈值 ${THRESHOLD_DAYS} 天"
+
+          if [ "${idle_days}" -ge "${THRESHOLD_DAYS}" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 推送心跳到独立分支
+        if: steps.check.outputs.stale == 'true' || inputs.force == true
+        env:
+          THRESHOLD_DAYS: ${{ vars.KEEPALIVE_THRESHOLD_DAYS || 45 }}
+          KEEPALIVE_BRANCH: ${{ vars.KEEPALIVE_BRANCH || 'keepalive' }}
+        run: |
+          git config user.name "duty-data-bot"
+          git config user.email "duty-data-bot@users.noreply.github.com"
+
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          status="$(printf '{"lastHeartbeatAt":"%s","thresholdDays":%s}\n' "$ts" "$THRESHOLD_DAYS")"
+
+          # 不切分支、不动工作区：直接构造一个只有 status.json 的孤儿 commit 推上去，
+          # 分支永远只有一个 commit，也不会影响 main。
+          blob="$(printf '%s' "$status" | git hash-object -w --stdin)"
+          tree="$(printf '100644 blob %s\tstatus.json\n' "$blob" | git mktree)"
+          commit="$(git commit-tree "$tree" -m "chore: keepalive $ts")"
+
+          git push --force origin "${commit}:refs/heads/${KEEPALIVE_BRANCH}"
+          echo "已推送心跳到 ${KEEPALIVE_BRANCH} 分支：${commit}"
+
+      - name: 同步到 Gitee
+        # 与 update-duty-data 互为兜底：一致则跳过，落后则补齐
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_USER: ${{ vars.GITEE_USER }}
+          GITEE_OWNER: ${{ vars.GITEE_OWNER }}
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
+        run: bash scripts/sync_gitee.sh

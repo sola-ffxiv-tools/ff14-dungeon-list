@@ -1,9 +1,9 @@
 name: update-duty-data
 
 on:
-  # 每月 1 日 18:00 UTC = 北京时间 2 日 02:00
+  # 每周一 18:00 UTC = 北京时间周二 02:00
   schedule:
-    - cron: "0 18 1 * *"
+    - cron: "0 18 * * 1"
   # 国服版本更新后手动触发一次
   workflow_dispatch:
     inputs:
@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   build-and-publish:
+    # 只在默认分支跑，避免手动在功能分支触发时把错误内容推到 Gitee
+    if: github.ref_name == github.event.repository.default_branch
     # 固定 24.04：ubuntu-latest 正在往 Ubuntu 26 迁移，避免环境漂移
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -54,44 +56,23 @@ jobs:
 
           git add data
           if git diff --cached --quiet; then
+            echo "内容无变化，跳过提交"
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "没有任何变化"
             exit 0
           fi
 
-          # 只有 maze.json / duties.json 变了才算内容更新；只更新 status.json 的是心跳提交。
-          # 心跳提交保证公共仓库 60 天内始终有活动，定时任务不会被 GitHub 自动禁用。
-          if git diff --cached --quiet -- data/maze.json data/duties.json; then
-            message="chore: heartbeat $(date -u +%Y-%m-%d)"
-            tag=""
-          else
-            message="data: refresh $(date -u +%Y-%m-%d)"
-            tag="data-$(date -u +%Y%m%d-%H%M%S)"
-          fi
-
-          git commit -m "$message"
+          git commit -m "data: refresh $(date -u +%Y-%m-%d)"
+          git tag "data-$(date -u +%Y%m%d-%H%M%S)"
           git push origin "HEAD:${GITHUB_REF_NAME}"
-          if [ -n "$tag" ]; then
-            git tag "$tag"
-            git push origin "$tag"
-          fi
+          git push origin --tags
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: 同步到 Gitee
-        # 内容更新和心跳提交都会推送，保证 Gitee 镜像始终跟 GitHub 一致
-        if: steps.publish.outputs.changed == 'true'
+        # 每次都跑：先比对 SHA，一致就跳过，不一致（含上次失败）自动补齐
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_USER: ${{ vars.GITEE_USER }}
+          GITEE_OWNER: ${{ vars.GITEE_OWNER }}
           GITEE_REPO: ${{ vars.GITEE_REPO }}
           GITEE_BRANCH: ${{ vars.GITEE_BRANCH }}
-        run: |
-          if [ -z "$GITEE_TOKEN" ] || [ -z "$GITEE_USER" ] || [ -z "$GITEE_REPO" ]; then
-            echo "::warning::Gitee 相关配置不完整（GITEE_TOKEN / GITEE_USER / GITEE_REPO），跳过同步"
-            exit 0
-          fi
-
-          branch="${GITEE_BRANCH:-main}"
-          git remote add gitee "https://${GITEE_USER}:${GITEE_TOKEN}@gitee.com/${GITEE_USER}/${GITEE_REPO}.git"
-          # Gitee 侧是纯镜像：即使建仓时勾了 README/初始提交也直接覆盖
-          git push --force gitee "HEAD:${branch}" --tags
+        run: bash scripts/sync_gitee.sh

@@ -318,17 +318,6 @@ def load_previous_signature(data_dir: Path) -> str:
     )
 
 
-def read_previous_status(data_dir: Path) -> dict:
-    path = data_dir / "status.json"
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def collect_unmapped(duties: list[Duty]) -> list[dict]:
     """找出规则未覆盖的 ContentType。
 
@@ -365,38 +354,6 @@ def print_unmapped_warning(unmapped: list[dict]) -> None:
             f"如需进分类视图，请更新 scripts/rules.py",
             file=sys.stderr,
         )
-
-
-def write_status(
-    out_dir: Path,
-    upstream: dict,
-    counts: dict,
-    data_version: str,
-    unmapped: list[dict],
-    content_changed: bool,
-    last_content_change_at: str,
-    now: datetime,
-) -> None:
-    """心跳文件：每次运行都会更新 lastCheckedAt。
-
-    GitHub 公共仓库的定时任务在 60 天无仓库活动后会被自动禁用，
-    每月提交一次 status.json 就是最小的"保活"活动；
-    同时它也方便排查"上次检查是什么时候、上游到哪个 commit"。
-    """
-    payload = {
-        "lastCheckedAt": utc_iso(now),
-        "lastContentChangeAt": last_content_change_at,
-        "contentChanged": content_changed,
-        "dataVersion": data_version,
-        "upstream": {
-            "repo": upstream.get("repo", "thewakingsands/ffxiv-datamining-cn"),
-            "ref": upstream.get("ref", "master"),
-            "commit": str(upstream.get("commit") or ""),
-        },
-        "counts": counts,
-        "unmappedContentTypes": unmapped,
-    }
-    write_json(out_dir / "status.json", payload)
 
 
 def validate(
@@ -512,40 +469,21 @@ def main() -> int:
     unmapped = collect_unmapped(duties)
     print_unmapped_warning(unmapped)
 
-    previous_payload = read_previous_payload(out_dir)
     previous_counts, previous_titles = load_previous_counts(out_dir)
     validate(categories, duties, previous_counts, previous_titles, args.force)
 
     flat_duties = [flat_duty(duty) for duty in sorted(duties, key=lambda d: d.id)]
     signature = content_signature(categories, flat_duties)
+    if signature == load_previous_signature(out_dir):
+        print("[build] 内容无变化，不写任何文件")
+        return 0
+
     now = utc_now()
     counts = {
         "mazeCategories": len(categories),
         "mazeDuties": maze_total,
         "allDuties": len(duties),
     }
-
-    if signature == load_previous_signature(out_dir):
-        previous_status = read_previous_status(out_dir)
-        last_content_change_at = (
-            previous_status.get("lastContentChangeAt")
-            or (previous_payload or {}).get("generatedAt")
-            or utc_iso(now)
-        )
-        data_version = str((previous_payload or {}).get("dataVersion") or "")
-        write_status(
-            out_dir,
-            upstream,
-            counts,
-            data_version,
-            unmapped,
-            False,
-            str(last_content_change_at),
-            now,
-        )
-        print("[build] 内容无变化，仅更新 data/status.json 心跳")
-        return 0
-
     # dataVersion 跟着内容走：内容变了才变，App 可以拿它当缓存 key
     signature_short = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:7]
     data_version = f"{now:%Y.%m.%d}-{signature_short}"
@@ -568,16 +506,6 @@ def main() -> int:
 
     write_json(out_dir / "maze.json", maze_payload)
     write_json(out_dir / "duties.json", duties_payload)
-    write_status(
-        out_dir,
-        upstream,
-        counts,
-        data_version,
-        unmapped,
-        True,
-        utc_iso(now),
-        now,
-    )
 
     print(f"[build] upstream commit: {upstream_commit or '(unknown)'}")
     print(f"[build] categories: {len(categories)}")
@@ -591,7 +519,7 @@ def main() -> int:
             f"maze {previous_counts.get('mazeDuties')} -> {maze_total}, "
             f"all {previous_counts.get('allDuties')} -> {len(duties)}"
         )
-    for name in ("maze.json", "duties.json", "status.json"):
+    for name in ("maze.json", "duties.json"):
         size = (out_dir / name).stat().st_size
         print(f"[build] wrote {out_dir / name} ({size / 1024:.1f} KB)")
     return 0

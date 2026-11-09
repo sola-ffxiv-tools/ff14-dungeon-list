@@ -4,7 +4,7 @@
 拉取 CSV，生成副本列表 JSON，提交回本仓库并同步到 Gitee，供 App 直接读取。
 
 - 不依赖任何第三方 API，运行时也不需要服务器/数据库
-- 每月自动刷新一次，国服版本更新后可手动触发
+- 每周自动刷新一次，国服版本更新后可手动触发
 - 数据全部来自游戏客户端，分类口径与 App 现有数据结构对齐
 
 ## 数据文件
@@ -79,34 +79,23 @@
 - `dataVersion` = 日期 + 内容哈希：**内容不变不会变**，可以直接当 App 的缓存 key / 更新判断依据
 - `unmappedContentTypes`：上游新增、但 `scripts/rules.py` 还没映射的类型列表（正常为空）。这些内容已经进 `duties`，只是暂时不在 `maze.json` 的分类视图里
 
-### `data/status.json`
+### `keepalive` 分支（心跳，App 不需要读）
 
-每次运行都会更新的心跳文件（约 0.5 KB），给维护者看，不建议 App 依赖：
+公共仓库的 scheduled workflow 在 60 天没有任何仓库活动后会被自动禁用
+（[官方说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)）。
+为了保活又不污染 main 的历史，`keepalive` workflow 只在仓库长期闲置时，
+往独立的 `keepalive` 分支推一个单 commit：
 
-```json
-{
-  "lastCheckedAt": "2026-11-09T08:45:06Z",
-  "lastContentChangeAt": "2026-11-02T07:01:41Z",
-  "contentChanged": false,
-  "dataVersion": "2026.11.02-ed9a884",
-  "upstream": { "repo": "thewakingsands/ffxiv-datamining-cn", "ref": "master", "commit": "2c6741c..." },
-  "counts": { "mazeCategories": 26, "mazeDuties": 450, "allDuties": 863 },
-  "unmappedContentTypes": []
-}
-```
-
-它有两个作用：
-
-1. 记录"上次检查时间 / 上游 commit / 是否真的有内容变化"
-2. **保活**：GitHub 公共仓库的定时任务在 60 天没有任何仓库活动后会被自动禁用
-   （[官方说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)），
-   每月提交一次 `status.json` 就是最小的活动量，保证定时任务一直有效
+- 分支里只有一个 `status.json`，记录 `lastHeartbeatAt` 和阈值
+- 每次都是孤儿 commit + force push，分支永远只有一个 commit
+- 距上次仓库活动 ≥ `KEEPALIVE_THRESHOLD_DAYS`（默认 45）天才触发
+- `main` 上只保留真正的数据更新提交
 
 ### App 读取地址
 
 ```text
 # 主推：Gitee 镜像（国内快）
-https://gitee.com/<GITEE_USER>/<GITEE_REPO>/raw/main/data/maze.json
+https://gitee.com/<GITEE_OWNER>/<GITEE_REPO>/raw/main/data/maze.json
 
 # 备用：GitHub raw（国内可能不稳）
 https://raw.githubusercontent.com/<GITHUB_USER>/<GITHUB_REPO>/main/data/maze.json
@@ -132,7 +121,7 @@ https://raw.githubusercontent.com/<GITHUB_USER>/<GITHUB_REPO>/main/data/maze.jso
 python scripts/fetch_upstream.py --out vendor
 python scripts/fetch_upstream.py --api-only --out vendor
 
-# 2. 生成 data/maze.json、data/duties.json、data/status.json
+# 2. 生成 data/maze.json、data/duties.json
 python scripts/build_duties.py --input vendor --out data
 
 # 3. 数据异常下降 / 分类被移除时会失败；确认无误可跳过保护
@@ -143,25 +132,28 @@ python scripts/build_duties.py --input vendor --out data --force
 
 ## 更新流水线
 
-`.github/workflows/update.yml` 流程：
+两个 workflow 都只跑在默认分支上。
+
+### `update-duty-data`（每周）
 
 1. 拉取 4 张上游 CSV（`ContentFinderCondition` / `ContentType` / `TerritoryType` / `ExVersion`）
 2. 生成 JSON 并做校验
-3. 内容有变化 → commit + 打 tag；只是心跳 → commit 不打 tag
-4. 推送 GitHub，并同步到 Gitee 同名仓库（整仓镜像）
+3. 内容有变化 → commit + 打 `data-*` tag，推送 GitHub
+4. 同步 Gitee：**先比对远端 SHA，一致就跳过（无任何副作用），不一致才 force push**；
+   上次同步失败也能在下次运行自动补齐
 
-即使内容没变，每次也会更新 `data/status.json`（心跳）并提交一次：
+没有内容变化时不会产生任何提交。触发方式：
 
-- GitHub 公共仓库的定时任务在 60 天无仓库活动后会被自动禁用，心跳提交保证它一直有效
-- Gitee 镜像也会跟着保持最新（否则内容不变时永远不会重新同步）
-- 只有 `maze.json` / `duties.json` 真正变化时才会打 `data-*` tag
-
-触发方式：
-
-- 每月 1 日 18:00 UTC（北京时间 2 日 02:00）自动执行
+- 每周一 18:00 UTC（北京时间周二 02:00）自动执行
 - 国服版本更新后，在 Actions 页面手动 `Run workflow`（可选填上游 ref）
 
-校验规则（`scripts/build_duties.py`）：
+### `keepalive`（每周）
+
+- 每周四检查一次仓库最后活动时间，闲置超过阈值才更新 `keepalive` 分支心跳
+- 仓库变量 `KEEPALIVE_THRESHOLD_DAYS`（默认 45）、`KEEPALIVE_BRANCH`（默认 `keepalive`）可调整
+- 手动触发时可勾选 `force` 立即推一次心跳，用来验证配置
+
+### 校验规则（`scripts/build_duties.py`）
 
 - 字段缺失（上游改表结构）直接失败
 - 全量 < 700 条、分类视图 < 400 条直接失败
@@ -171,29 +163,32 @@ python scripts/build_duties.py --input vendor --out data --force
 
 ## 设计取舍：数据放 `data/` 还是单独分支？
 
-目前选择放在默认分支的 `data/` 目录，而不是单独建 `data` 分支，理由：
+数据本身放在默认分支的 `data/` 目录，不单独建 `data` 分支：
 
-- 数据量很小（三个文件合计约 300 KB），一年 12 次心跳提交不会让仓库变重
-- 代码、规则、数据在同一个 commit 里，`git revert` 一次就能回滚"代码 + 数据"
-- 维护面最小（Razor）：workflow 不用 checkout 两个分支，Gitee 也不用镜像额外分支
-- **60 天自动禁用和放不放分支无关**：两种方式只要"没变化就不提交"都会踩坑，靠心跳解决
+- 数据量很小（两份 JSON 合计约 300 KB），一年十几次数据提交不会让仓库变重
+- 代码、规则、数据在同一个 commit 里，`git revert` 一次就能回滚
+- 维护面最小（Razor）：workflow 不用 checkout 两个分支，Gitee 只需要镜像 main
+- 保活提交走独立的 `keepalive` 分支，不占用 main 的历史
 
-如果以后数据体积变大，或想保护 main 只允许 PR 修改，再拆 `data` 分支也不迟：
-独立 workflow 推送 `data` 分支，App 的 URL 改一下分支路径即可。
+如果以后数据体积变大，或想保护 main 只允许 PR 修改，再拆 `data` 分支也不迟。
 
 ## 仓库配置（一次性）
 
 1. GitHub 新建仓库，默认分支设为 `main`
-2. Gitee 新建同名仓库（空仓库即可，默认分支建议 `main`；workflow 用 force push 覆盖镜像）
+2. Gitee 新建目标仓库（空仓库即可，默认分支建议 `main`；workflow 用 force push 覆盖镜像）
 3. GitHub 仓库 `Settings → Secrets and variables → Actions`：
    - **Secret** `GITEE_TOKEN`：Gitee「私人令牌」，需要仓库读写权限
-   - **Variable** `GITEE_USER`：Gitee 用户名
-   - **Variable** `GITEE_REPO`：Gitee 仓库名
+   - **Variable** `GITEE_OWNER`：目标仓库的命名空间（个人用户名或组织名）
+   - **Variable** `GITEE_REPO`：目标仓库名
+   - **Variable** `GITEE_USER`：令牌所属账号，需对目标仓库有写权限
    - **Variable** `GITEE_BRANCH`：可选，默认 `main`
+   - **Variable** `KEEPALIVE_THRESHOLD_DAYS`：可选，默认 `45`
+   - **Variable** `KEEPALIVE_BRANCH`：可选，默认 `keepalive`
 4. 把本目录的 `data/` 一起提交（首次发布会带着当前数据）
 5. 到 Actions 手动跑一次，确认 Gitee 同步成功
 
-> 如果暂时不想接 Gitee，不配置上面这些变量即可，workflow 会跳过同步并给出 warning。
+> 组织名/仓库名全部通过 Variables 配置，fork 后改成自己的即可，代码里没有硬编码。
+> 如果暂时不想接 Gitee，不配置这些变量即可，workflow 会跳过同步并给出 warning。
 
 ## 分类规则
 
@@ -218,7 +213,7 @@ python scripts/build_duties.py --input vendor --out data --force
 新增 ContentType 时**不会报错中断**，流水线照常发布：
 
 - 内容会出现在 `duties.json` 的 `duties` 里（`contentTypeName` 取自 `ContentType.csv`，表里没名字则显示 `其他内容（type N）`）
-- `status.json` / `duties.json` 的 `unmappedContentTypes` 会列出它，日志里也有 `警告:` 提示
+- `duties.json` 的 `unmappedContentTypes` 会列出它，日志里也有 `警告:` 提示
 - 确认要进分类视图后，在 `scripts/rules.py` 里加一行映射，手动触发一次 workflow 即可
 
 ## 历史说明
