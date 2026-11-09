@@ -21,8 +21,10 @@ __all__ = [
     "SPECIAL_SCENE_TYPES",
     "DEEP_DUNGEON_FLOOR_TYPE",
     "DEEP_DUNGEON_EXTRA_TYPE",
+    "FULL_ONLY_TYPES",
     "EXCLUDE_NAME_PATTERNS",
     "build_maze_categories",
+    "known_content_types",
     "to_maze_json",
 ]
 
@@ -66,12 +68,30 @@ SPECIAL_SCENE_TYPES: tuple[int, ...] = (26, 29, 38)
 DEEP_DUNGEON_FLOOR_TYPE = 21
 DEEP_DUNGEON_EXTRA_TYPE = 39
 
+#: 已知、但只进全量数据（duties.json 的 duties）不进分类视图的类型。
+#: 这些是 PvP、金蝶、任务战斗、寻宝等，不属于"副本列表"的展示口径。
+FULL_ONLY_TYPES: tuple[int, ...] = (6, 7, 9, 16, 19, 20, 23, 40)
+
 #: 算不上"副本选择项"的条目（目前是活动占位）
 EXCLUDE_NAME_PATTERNS: tuple[str, ...] = (r"^活动挑战\d+$",)
 
 _EXCLUDE_RE = re.compile("|".join(EXCLUDE_NAME_PATTERNS))
 # "死者宫殿 地下1～10层" / "天之御柱 1～10层" / "朝圣交错路 第1～10朝圣路"
 _FLOOR_SUFFIX_RE = re.compile(r"\s+(?:地下)?\d+～\d+层$|\s+第\d+～\d+朝圣路$")
+
+
+def known_content_types() -> set[int]:
+    """规则已经覆盖的 ContentType id 集合。
+
+    不在这个集合里的类型会进入全量数据，但不会进入分类视图；
+    build_duties.py 会把它们列出来提醒维护者补规则。
+    """
+    types = set(SPLIT_TYPES)
+    types.update(content_type for content_type, _ in PLAIN_TYPES)
+    types.update(SPECIAL_SCENE_TYPES)
+    types.update((DEEP_DUNGEON_FLOOR_TYPE, DEEP_DUNGEON_EXTRA_TYPE))
+    types.update(FULL_ONLY_TYPES)
+    return types
 
 
 def _filter_usable(duties: Sequence[Duty]) -> list[Duty]:
